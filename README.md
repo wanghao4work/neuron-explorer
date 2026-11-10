@@ -38,6 +38,33 @@ The R and J++ lens rows read the maps of [bubskee/qwen3.5-4b-r-jpp-lenses](https
   `explorer/agent_prompt.local.md` when present (untracked, for your own additions);
   `EXPLORER_CLAUDE_MODEL` picks the model. The server defaults to local-only access; see below for remote deployment.
 
+### Public recipes: chat directly with steered Qwen
+
+Click **Public recipes / 公开配方** in the top bar; no neuron selection or Claude/Codex setup is needed.
+
+1. Search the public neuronary catalog (top/new/hot, with pagination), or paste a
+   `https://neuronary.org/r/<id>` link / recipe ID and click **Load**.
+2. Inspect the recipe's model, description, neurons and signed doses. Public reads do not require
+   a neuronary account or token. Recipes for another model cannot be run.
+3. Enter a prompt, or select one of the recipe's example prompts. The model generates three streaming
+   columns: **Recipe**, **Original**, and **Reversed** (all neuron doses reversed, not an undo operation).
+   All listed neurons are applied together; these are runtime activation interventions, not saved weight edits.
+4. Continue chatting: each column uses its own previous answers. **Stop** cancels generation;
+   interrupted/failed turns are excluded from subsequent history. The latest 50 completed turns are retained
+   in generation context. Switching recipes or changing sampling settings clears the conversation.
+
+Generation settings start with the recipe's recommended temperature, repetition penalty, min-p and seed
+(or runtime defaults); they can be adjusted together with the output token limit. The server must have the
+live model enabled. The existing single-neuron Chat tab is unchanged. GPU memory must accommodate three
+parallel sequences, so lower the token limit or clear long chats if memory is tight.
+
+Tests:
+
+```bash
+uv run python -m unittest discover -s tests -v
+node tests/browser_recipes.mjs  # requires local Google Chrome; override with CHROME_BIN if needed
+```
+
 ### RunPod / remote access
 
 The API can launch agents with shell access. **Do not expose it without a strong password.**

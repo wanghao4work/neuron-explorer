@@ -12,7 +12,7 @@ import threading
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from transformers import AutoConfig
@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rank import compute_units  # noqa: E402
 from runtime import CACHE, MODEL, NO_MODEL, Runtime  # noqa: E402
 from network import NetworkConfig  # noqa: E402
+from recipes import recipe_router, validate_steering  # noqa: E402
 
 RUNS, STATS = os.path.join(ROOT, "runs"), os.path.join(ROOT, "stats")
 # the agent's neuronary.org tools (agent_mcp.py) read the person's token from here when set
@@ -37,6 +38,7 @@ ARCH = {"n_layers": _cfg.num_hidden_layers, "hidden": _cfg.hidden_size, "inter":
         "linear_v_heads": _cfg.linear_num_value_heads}
 
 app = FastAPI()
+app.include_router(recipe_router(MODEL))
 
 
 # Keep DNS-rebinding/CSRF protection when exposing the model and shell-capable agent.
@@ -246,7 +248,9 @@ async def reads(req: Request):
 
 @app.post("/api/steer")
 async def steer(req: Request):
-    b = await req.json()
+    if NO_MODEL:
+        raise HTTPException(503, "Live model is disabled (EXPLORER_NO_MODEL=1)")
+    b = validate_steering(await req.json(), ARCH, MODEL)
     loop, q, cancel = asyncio.get_running_loop(), asyncio.Queue(), threading.Event()
 
     def work():
@@ -255,11 +259,13 @@ async def steer(req: Request):
             rows = []
             for r in range(3):
                 msgs = []
-                for turn in b.get("history", []):
-                    msgs += [{"role": "user", "content": turn["user"]}, {"role": "assistant", "content": turn["replies"][r]}]
-                rows.append(msgs + [{"role": "user", "content": b["prompt"]}])
-            for row, delta in rt.steer_stream(int(b["layer"]), int(b["n"]), rows, float(b["dose"]),
-                                              b.get("mode", "add"), int(b.get("max_new", 300)), cancel):
+                for turn in b.history:
+                    msgs += [{"role": "user", "content": turn.user}, {"role": "assistant", "content": turn.replies[r]}]
+                rows.append(msgs + [{"role": "user", "content": b.prompt}])
+            pushes = [(n.layer, n.n, n.dose, n.mode) for n in b.neurons]
+            for row, delta in rt.steer_multi(pushes, rows, b.max_new, cancel,
+                                             temperature=b.temperature, repetition_penalty=b.repetition_penalty,
+                                             seed=b.seed, min_p=b.min_p):
                 loop.call_soon_threadsafe(q.put_nowait, {"row": row, "t": delta})
         except Exception as e:  # surfaced in the UI next to the chat
             loop.call_soon_threadsafe(q.put_nowait, {"row": None, "error": repr(e)})
@@ -269,7 +275,14 @@ async def steer(req: Request):
     async def events():
         try:
             while True:
-                ev = await q.get()
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    # Keep cloud proxies alive while waiting for model loading / the GPU lock.
+                    yield ": keepalive\n\n"
+                    if await req.is_disconnected():
+                        break
+                    continue
                 yield f"data: {json.dumps(ev)}\n\n"
                 if ev["row"] is None:
                     break
