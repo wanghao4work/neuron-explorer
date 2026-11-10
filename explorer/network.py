@@ -2,11 +2,14 @@
 import base64
 import binascii
 import hmac
+import logging
 import os
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from starlette.responses import PlainTextResponse
+
+log = logging.getLogger("uvicorn.error")
 
 
 def parse_origin(value):
@@ -24,6 +27,7 @@ class NetworkConfig:
     port: int
     public_url: str
     password: str
+    trust_proxy_headers: bool = False
 
     @classmethod
     def from_env(cls):
@@ -34,16 +38,17 @@ class NetworkConfig:
             public_url = f"https://{pod}-{port}.proxy.runpod.net"
         host = os.environ.get("EXPLORER_HOST", "0.0.0.0" if pod else "127.0.0.1")
         password = os.environ.get("EXPLORER_PASSWORD", "")
+        trust_proxy_headers = os.environ.get("EXPLORER_TRUST_PROXY_HEADERS", "1" if pod else "0") == "1"
         if not 1 <= port <= 65535:
             raise ValueError("PORT must be between 1 and 65535")
         if public_url:
             parse_origin(public_url)
-        if host not in ("127.0.0.1", "localhost", "::1") or public_url:
+        if host not in ("127.0.0.1", "localhost", "::1") or public_url or trust_proxy_headers:
             if not password:
                 raise ValueError("Set EXPLORER_PASSWORD before enabling remote access (the agent can run shell commands)")
             if not public_url:
                 raise ValueError("Set EXPLORER_PUBLIC_URL to the browser's external http(s) origin")
-        return cls(host, port, public_url, password)
+        return cls(host, port, public_url, password, trust_proxy_headers)
 
     @property
     def internal_url(self):
@@ -54,21 +59,39 @@ class NetworkConfig:
         return {"EXPLORER_URL": self.internal_url, "EXPLORER_PASSWORD": self.password}
 
     async def protect(self, request, call_next):
-        # Never trust forwarded Host headers from arbitrary clients. RunPod preserves
-        # Host; its HTTPS origin is configured separately from the internal HTTP hop.
+        # Some proxies rewrite Host. Opt-in forwarded-host handling still requires
+        # an exact configured authority AND authentication; it is not client identity.
         hosts = {f"localhost:{self.port}", f"127.0.0.1:{self.port}", f"[::1]:{self.port}"}
         origins = {("http", host, self.port) for host in ("localhost", "127.0.0.1", "::1")}
+        public_hosts = set()
         if self.public_url:
-            origins.add(parse_origin(self.public_url))
-            hosts.add(urlsplit(self.public_url).netloc.lower())
+            public_origin = parse_origin(self.public_url)
+            origins.add(public_origin)
+            public_hosts.add(urlsplit(self.public_url).netloc.lower())
+            # Browsers/proxies may include or omit a scheme's default port.
+            if public_origin[2] == (443 if public_origin[0] == "https" else 80):
+                hostname = urlsplit(self.public_url).hostname
+                authority = f"[{hostname}]" if ":" in hostname else hostname
+                public_hosts.update((authority.lower(), f"{authority}:{public_origin[2]}".lower()))
+            hosts.update(public_hosts)
+        host = request.headers.get("host", "").lower()
+        forwarded_host = request.headers.get("x-forwarded-host", "").strip().lower()
+        valid_host = host in hosts or (self.trust_proxy_headers and self.password
+                                      and forwarded_host in public_hosts)
         origin = request.headers.get("origin")
         try:
             valid_origin = not origin or parse_origin(origin) in origins
         except ValueError:
             valid_origin = False
-        if (request.headers.get("host", "").lower() not in hosts or not valid_origin
-                or (request.headers.get("sec-fetch-site") in ("cross-site", "same-site")
-                    and not (request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate"))):
+        valid_fetch = not (request.headers.get("sec-fetch-site") in ("cross-site", "same-site")
+                           and not (request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate"))
+        if not valid_host or not valid_origin or not valid_fetch:
+            reason = "host" if not valid_host else "origin" if not valid_origin else "fetch-metadata"
+            # No Authorization, cookies, query parameters or passwords in diagnostics.
+            log.warning("Explorer rejected request: reason=%s host=%r x-forwarded-host=%r origin=%r "
+                        "sec-fetch-site=%r sec-fetch-mode=%r public_url=%r trust_proxy_headers=%s",
+                        reason, host, forwarded_host, origin, request.headers.get("sec-fetch-site"),
+                        request.headers.get("sec-fetch-mode"), self.public_url, self.trust_proxy_headers)
             return PlainTextResponse("forbidden", status_code=403)
         if self.password:
             try:

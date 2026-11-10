@@ -50,6 +50,7 @@ export EXPLORER_HOST=0.0.0.0
 export PORT=8791
 # Replace <pod-id> with your Pod ID. In RunPod this is inferred from RUNPOD_POD_ID if omitted.
 export EXPLORER_PUBLIC_URL='https://<pod-id>-8791.proxy.runpod.net'
+export EXPLORER_TRUST_PROXY_HEADERS=1
 uv run python explorer/server.py
 ```
 
@@ -61,9 +62,17 @@ When `RUNPOD_POD_ID` is present, the default bind address is `0.0.0.0`; otherwis
 For a custom domain or another reverse proxy, set `EXPLORER_PUBLIC_URL` to the exact external origin
 (scheme, hostname and non-default port, **no path**). Preserve the original `Host` and `Authorization`
 headers, disable response buffering for streaming endpoints, and use HTTPS for the public connection.
+If the proxy rewrites `Host`, enable `EXPLORER_TRUST_PROXY_HEADERS=1` and have it overwrite
+`X-Forwarded-Host` with the original public authority. This option defaults to enabled when
+`RUNPOD_POD_ID` is present. It only accepts the exact configured public domain and still requires
+password authentication; it does not trust arbitrary forwarded domains or disable Origin checks.
 Changing only the bind address is not sufficient: the server validates Host and Origin to prevent
 DNS rebinding and cross-site requests. Remote configuration without a password fails at startup.
 Do not use `0.0.0.0` as the browser URL or enable wildcard CORS/Host access.
+
+For a 403 response, check the server's `Explorer rejected request` warning: it includes the rejection
+reason and observed Host/Origin/proxy headers (not credentials). Ensure `EXPLORER_PUBLIC_URL` matches
+the actual browser URL, not a literal placeholder or an empty Pod ID. Restart after changing environment variables.
 
 The Claude/Codex MCP tools continue to use the internal loopback URL and automatically authenticate.
 Custom scripts accessing the API must authenticate too, for example:

@@ -42,6 +42,7 @@ class NetworkTests(unittest.TestCase):
         with patch.dict("os.environ", {"RUNPOD_POD_ID": "pod", "EXPLORER_PASSWORD": "secret", "PORT": "8888"}, clear=True):
             config = NetworkConfig.from_env()
         self.assertEqual(config.host, "0.0.0.0")
+        self.assertTrue(config.trust_proxy_headers)
         self.assertEqual(config.public_url, "https://pod-8888.proxy.runpod.net")
         self.assertEqual(config.agent_env, {"EXPLORER_URL": "http://127.0.0.1:8888", "EXPLORER_PASSWORD": "secret"})
 
@@ -78,6 +79,36 @@ class NetworkTests(unittest.TestCase):
         response = self.remote().get("/api/test", auth=("explorer", "secret"), headers={
             "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate"})
         self.assertEqual(response.status_code, 200)
+
+    def test_rewritten_proxy_host(self):
+        config = NetworkConfig("0.0.0.0", 8791, "https://pod-8791.proxy.runpod.net", "secret", True)
+        client = self.client(config, "http://10.0.0.5:8791")
+        headers = {"X-Forwarded-Host": "pod-8791.proxy.runpod.net", "Origin": config.public_url,
+                   "Sec-Fetch-Site": "same-origin"}
+        self.assertEqual(client.get("/api/test", headers=headers).status_code, 401)
+        self.assertEqual(client.post("/api/test", headers=headers, auth=("explorer", "secret")).status_code, 200)
+        for value in ("evil.example", "evil.example, pod-8791.proxy.runpod.net"):
+            headers["X-Forwarded-Host"] = value
+            self.assertEqual(client.get("/api/test", headers=headers, auth=("explorer", "secret")).status_code, 403)
+
+    def test_proxy_header_does_not_bypass_origin_checks(self):
+        config = NetworkConfig("0.0.0.0", 8791, "https://pod-8791.proxy.runpod.net", "secret", True)
+        client = self.client(config, "http://10.0.0.5:8791")
+        response = client.post("/api/test", auth=("explorer", "secret"), headers={
+            "X-Forwarded-Host": "pod-8791.proxy.runpod.net", "Origin": "https://evil.example"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_explicit_default_port(self):
+        response = self.remote().get("/api/test", auth=("explorer", "secret"),
+                                     headers={"Host": "pod-8791.proxy.runpod.net:443"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_rejection_diagnostics(self):
+        with self.assertLogs("uvicorn.error", level="WARNING") as logs:
+            self.remote().get("/api/test", auth=("explorer", "secret"), headers={"Host": "unexpected-host"})
+        self.assertIn("reason=host", logs.output[0])
+        self.assertIn("unexpected-host", logs.output[0])
+        self.assertNotIn("secret", logs.output[0])
 
     def test_internal_agent_authenticated(self):
         config = NetworkConfig("0.0.0.0", 8791, "https://pod-8791.proxy.runpod.net", "secret")
