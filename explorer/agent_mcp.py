@@ -5,6 +5,7 @@ run the live model (steered rollouts, activations) when it is loaded, and drive 
 The neuronary_* tools talk to neuronary.org (search, download, publish recipes). Reads need nothing; writes need a token
 from neuronary.org -> account menu -> API & agents, in NEURONARY_TOKEN or ~/.neuronary/token.
 """
+import base64
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ import urllib.parse
 import urllib.request
 
 URL = os.environ.get("EXPLORER_URL", "http://127.0.0.1:8791")
+PASSWORD = os.environ.get("EXPLORER_PASSWORD", "")
 CHAT = os.environ.get("EXPLORER_CHAT", "")
 NEURONARY = os.environ.get("NEURONARY_API", "https://mcczbdcymyhzfputyqcr.supabase.co/functions/v1/api")
 MODEL = os.environ.get("EXPLORER_MODEL", "Qwen/Qwen3.5-4B")
@@ -269,13 +271,22 @@ TOOLS = [
 ]
 
 
+def explorer_request(url, data=None):
+    req = urllib.request.Request(url, data, {"Content-Type": "application/json"})
+    if PASSWORD:
+        credentials = base64.b64encode(f"explorer:{PASSWORD}".encode()).decode()
+        req.add_header("Authorization", f"Basic {credentials}")
+    return req
+
+
 def get(path, **q):
-    with urllib.request.urlopen(f"{URL}{path}?{urllib.parse.urlencode(q)}", timeout=60) as r:
+    req = explorer_request(f"{URL}{path}?{urllib.parse.urlencode(q)}")
+    with urllib.request.urlopen(req, timeout=60) as r:
         return json.load(r)
 
 
 def post(path, body, timeout=60):
-    req = urllib.request.Request(f"{URL}{path}", json.dumps(body).encode(), {"Content-Type": "application/json"})
+    req = explorer_request(f"{URL}{path}", json.dumps(body).encode())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 

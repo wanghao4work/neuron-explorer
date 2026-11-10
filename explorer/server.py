@@ -13,7 +13,7 @@ import threading
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from transformers import AutoConfig
 
@@ -22,12 +22,14 @@ sys.path.insert(0, os.path.join(ROOT, "sweep"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rank import compute_units  # noqa: E402
 from runtime import CACHE, MODEL, NO_MODEL, Runtime  # noqa: E402
+from network import NetworkConfig  # noqa: E402
 
 RUNS, STATS = os.path.join(ROOT, "runs"), os.path.join(ROOT, "stats")
 # the agent's neuronary.org tools (agent_mcp.py) read the person's token from here when set
 NEURONARY_ENV = {k: os.environ[k] for k in ("NEURONARY_TOKEN", "NEURONARY_API") if os.environ.get(k)}
 NAMES = os.path.join(ROOT, "explorer", "names.json")
-PORT = int(os.environ.get("PORT", 8791))
+NETWORK = NetworkConfig.from_env()
+PORT = NETWORK.port
 _cfg = AutoConfig.from_pretrained(MODEL).get_text_config()
 ARCH = {"n_layers": _cfg.num_hidden_layers, "hidden": _cfg.hidden_size, "inter": _cfg.intermediate_size,
         "layer_types": list(_cfg.layer_types), "attn_heads": _cfg.num_attention_heads,
@@ -37,22 +39,8 @@ ARCH = {"n_layers": _cfg.num_hidden_layers, "hidden": _cfg.hidden_size, "inter":
 app = FastAPI()
 
 
-# only this machine's own pages and tools: a page on another site (or a DNS name rebound to 127.0.0.1) can't reach
-# the API, which runs the model and a Claude agent with a shell. Links from elsewhere still open pages (a top-level GET
-# navigation, whose response the linking site can't read).
-LOCAL_HOSTS = {f"localhost:{PORT}", f"127.0.0.1:{PORT}", f"[::1]:{PORT}"}
-
-
-@app.middleware("http")
-async def local_only(request, call_next):
-    from urllib.parse import urlparse
-    origin = request.headers.get("origin")
-    if (request.headers.get("host") not in LOCAL_HOSTS
-            or (origin and urlparse(origin).netloc not in LOCAL_HOSTS)
-            or (request.headers.get("sec-fetch-site") in ("cross-site", "same-site")
-                and not (request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate"))):
-        return PlainTextResponse("forbidden", status_code=403)
-    return await call_next(request)
+# Keep DNS-rebinding/CSRF protection when exposing the model and shell-capable agent.
+app.middleware("http")(NETWORK.protect)
 
 
 @app.middleware("http")
@@ -1497,7 +1485,7 @@ CHAT_IDLE = 30 * 60  # seconds without listeners or turns before a chat's input 
 
 def _claude_cmd(cid):
     mcp = {"mcpServers": {"explorer": {"command": sys.executable, "args": [os.path.join(ROOT, "explorer", "agent_mcp.py")],
-                                       "env": {"EXPLORER_URL": f"http://127.0.0.1:{PORT}", "EXPLORER_CHAT": cid, **NEURONARY_ENV}}}}
+                                       "env": {**NETWORK.agent_env, "EXPLORER_CHAT": cid, **NEURONARY_ENV}}}}
     cmd = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--system-prompt-file", agent_prompt_file(), "--mcp-config", json.dumps(mcp), "--strict-mcp-config",
            # file tools and a shell, so it can run scripts against this server (e.g. score a file it shouldn't read)
@@ -1734,7 +1722,7 @@ async def _ensure_codex(c):
     c["pump"] = asyncio.create_task(_codex_pump(c, proc))
     await _rpc(c, "initialize", {"clientInfo": {"name": "neuron-explorer", "version": "0.1"}})
     mcp = {"explorer": {"command": sys.executable, "args": [os.path.join(ROOT, "explorer", "agent_mcp.py")],
-                        "env": {"EXPLORER_URL": f"http://127.0.0.1:{PORT}", "EXPLORER_CHAT": c["session"], **NEURONARY_ENV}}}
+                        "env": {**NETWORK.agent_env, "EXPLORER_CHAT": c["session"], **NEURONARY_ENV}}}
     opts = {"cwd": AGENT_DIR, "approvalPolicy": "never", "sandbox": "danger-full-access", "config": {"mcp_servers": mcp},
             "developerInstructions": open(agent_prompt_file()).read() + CODEX_NOTE.replace("{ROOT}", ROOT)}
     thread = _meta().get(c["session"], {}).get("thread")
@@ -1927,4 +1915,4 @@ def preload():
 
 if __name__ == "__main__":
     # chat event streams stay open indefinitely; on shutdown, close them after a few seconds instead of waiting
-    uvicorn.run(app, host="127.0.0.1", port=PORT, timeout_graceful_shutdown=3)
+    uvicorn.run(app, host=NETWORK.host, port=PORT, timeout_graceful_shutdown=3)

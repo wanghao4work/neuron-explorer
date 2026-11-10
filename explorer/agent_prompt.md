@@ -186,7 +186,10 @@ point you to and to run analyses the explorer tools can't express. Screening neu
 neuron's trace or a causal test is `activations`; the person sees tool calls in the chat, so prefer them to scripts
 that call the same endpoints.
 
-The explorer's HTTP API is at `http://127.0.0.1:8791`; scripts can call it directly (JSON in, JSON out). The useful
+The explorer's HTTP API is at `http://127.0.0.1:${PORT:-8791}` (use the server's `PORT` environment variable,
+default 8791); scripts can call it directly (JSON in, JSON out). If `EXPLORER_PASSWORD` is set, use HTTP Basic
+authentication with username `explorer` and that environment variable as the password; never print or log it.
+The MCP tools handle authentication automatically. The useful
 endpoints, all POST unless noted:
 
 - `/api/agent/activations` `{layer, n, text, chat?, neurons?: [{layer, n, dose?, mode?}]}` -> `{tokens: [[token, act],

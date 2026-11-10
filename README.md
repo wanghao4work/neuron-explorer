@@ -36,7 +36,44 @@ The R and J++ lens rows read the maps of [bubskee/qwen3.5-4b-r-jpp-lenses](https
   live model (steering, activations, next-token logprobs, ablations), moves the map, list and highlights, and has file
   tools and a shell in your home folder. Its prompt is `explorer/agent_prompt.md` plus `explorer/agent_methodology.md`, and
   `explorer/agent_prompt.local.md` when present (untracked, for your own additions);
-  `EXPLORER_CLAUDE_MODEL` picks the model. The server answers only pages and tools on this machine.
+  `EXPLORER_CLAUDE_MODEL` picks the model. The server defaults to local-only access; see below for remote deployment.
+
+### RunPod / remote access
+
+The API can launch agents with shell access. **Do not expose it without a strong password.**
+On your RunPod GPU Pod, expose **HTTP port 8791** in the Pod settings (not just a TCP port), then run:
+
+```bash
+uv sync
+export EXPLORER_PASSWORD='replace-with-a-long-random-password'
+export EXPLORER_HOST=0.0.0.0
+export PORT=8791
+# Replace <pod-id> with your Pod ID. In RunPod this is inferred from RUNPOD_POD_ID if omitted.
+export EXPLORER_PUBLIC_URL='https://<pod-id>-8791.proxy.runpod.net'
+uv run python explorer/server.py
+```
+
+Open that HTTPS URL (or RunPod's **Connect → HTTP Service [8791]** link). The browser will ask for
+username **`explorer`** and the password from `EXPLORER_PASSWORD`. The model runs on the Pod's GPU;
+the browser uses same-origin API requests and streaming responses through the RunPod proxy.
+When `RUNPOD_POD_ID` is present, the default bind address is `0.0.0.0`; otherwise it remains `127.0.0.1`.
+
+For a custom domain or another reverse proxy, set `EXPLORER_PUBLIC_URL` to the exact external origin
+(scheme, hostname and non-default port, **no path**). Preserve the original `Host` and `Authorization`
+headers, disable response buffering for streaming endpoints, and use HTTPS for the public connection.
+Changing only the bind address is not sufficient: the server validates Host and Origin to prevent
+DNS rebinding and cross-site requests. Remote configuration without a password fails at startup.
+Do not use `0.0.0.0` as the browser URL or enable wildcard CORS/Host access.
+
+The Claude/Codex MCP tools continue to use the internal loopback URL and automatically authenticate.
+Custom scripts accessing the API must authenticate too, for example:
+
+```bash
+curl -u "explorer:$EXPLORER_PASSWORD" http://127.0.0.1:8791/api/status
+```
+
+Initial startup downloads model files from Hugging Face; ensure sufficient GPU memory, disk space
+and network access. To use only cached data without loading model weights, set `EXPLORER_NO_MODEL=1`.
 
 ## Sweep
 
